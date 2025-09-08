@@ -1,0 +1,147 @@
+version: '3.8'
+
+services:
+  # Main Ocean Hazard Detection API
+  ocean-hazard-api:
+    build: .
+    container_name: ocean_hazard_api
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_PATH=/app/data/alerts.db
+      - MODELS_PATH=/app/models
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - ocean-hazard-network
+
+  # Redis for caching and session management (optional)
+  redis:
+    image: redis:7-alpine
+    container_name: ocean_hazard_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - ocean-hazard-network
+
+  # PostgreSQL Database (alternative to SQLite for production)
+  postgres:
+    image: postgres:15-alpine
+    container_name: ocean_hazard_postgres
+    environment:
+      POSTGRES_DB: ocean_hazards
+      POSTGRES_USER: hazard_user
+      POSTGRES_PASSWORD: secure_password_123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - ocean-hazard-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: ocean_hazard_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - ocean-hazard-api
+    restart: unless-stopped
+    networks:
+      - ocean-hazard-network
+
+  # ML Model Training Service (separate container for heavy operations)
+  ml-trainer:
+    build: .
+    container_name: ocean_hazard_ml_trainer
+    command: python -c "from ocean_hazard_ml_system import OceanHazardMLSystem; ml = OceanHazardMLSystem(); ml.train_models(); ml.save_models()"
+    volumes:
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - MODELS_PATH=/app/models
+    env_file:
+      - .env
+    networks:
+      - ocean-hazard-network
+    profiles:
+      - training
+
+  # Alert Worker Service (for background alert processing)
+  alert-worker:
+    build: .
+    container_name: ocean_hazard_worker
+    command: >
+      python -c "import time;
+      print('🔄 Alert Worker Service Started');
+      while True:
+        print('⏰ Processing background alerts...');
+        time.sleep(60)"
+
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      - ocean-hazard-api
+      - redis
+    environment:
+      - WORKER_MODE=true
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - ocean-hazard-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  ocean-hazard-network:
+    driver: bridge
+
+# Additional configurations for different environments
+x-development-overrides:
+  &development-overrides
+  environment:
+    - FLASK_ENV=development
+    - FLASK_DEBUG=True
+  volumes:
+    - .:/app
+  command: python alert_system.py
+
+x-production-overrides:
+  &production-overrides
+  environment:
+    - FLASK_ENV=production
+    - FLASK_DEBUG=False
+  restart: always
+  deploy:
+    resources:
+      limits:
+        cpus: '0.5'
+        memory: 512M
