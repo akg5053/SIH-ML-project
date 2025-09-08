@@ -13,3 +13,8 @@
 2. Run:
    ```bash
    docker compose up --build
+3.Health checks:
+
+ML: http://localhost:8000/health
+
+Alerts: http://localhost:8001/health
